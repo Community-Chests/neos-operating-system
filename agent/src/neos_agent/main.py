@@ -261,13 +261,18 @@ def create_app(settings: "Settings | None" = None) -> Sanic:
             return None
 
         def _unauth(delete_cookie: bool = False):
-            """Return 401 JSON for API routes; redirect browsers to login."""
-            if request.path.startswith("/api/"):
+            """Return appropriate unauth response based on request type:
+            - HTMX requests get 401 + HX-Redirect (HTMX handles nav cleanly)
+            - API requests get plain 401 JSON
+            - Browser page requests get a 302 redirect to login
+            """
+            if request.headers.get("HX-Request") == "true":
                 resp = json_response({"error": "Unauthorized"}, status=401)
-                if delete_cookie:
-                    resp.delete_cookie("neos_session", path="/")
-                return resp
-            resp = redirect("/auth/login")
+                resp.headers["HX-Redirect"] = "/auth/login"
+            elif request.path.startswith("/api/"):
+                resp = json_response({"error": "Unauthorized"}, status=401)
+            else:
+                resp = redirect("/auth/login")
             if delete_cookie:
                 resp.delete_cookie("neos_session", path="/")
             return resp

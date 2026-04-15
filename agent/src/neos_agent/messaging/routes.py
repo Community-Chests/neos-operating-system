@@ -12,9 +12,9 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from sanic import Blueprint
+from sanic import Blueprint, html as sanic_html
 from sanic.request import Request
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from neos_agent.auth.middleware import verify_session_cookie
 from neos_agent.db.models import (
@@ -22,6 +22,7 @@ from neos_agent.db.models import (
     Conversation,
     ConversationParticipant,
     Member,
+    Message,
 )
 from neos_agent.messaging.connections import connection_manager
 from neos_agent.messaging.handlers import (
@@ -124,3 +125,49 @@ async def messaging_ws(request: Request, ws):
         keepalive_task.cancel()
         connection_manager.unregister(member.id, ws)
         logger.info("WebSocket disconnected: %s (%s)", member.display_name, member.id)
+
+
+# ===================================================================
+# HTMX fragment endpoints
+# ===================================================================
+
+@messaging_bp.get("/unread-count")
+async def messaging_unread_count(request: Request):
+    """HTMX fragment: total unread message count badge for the nav sidebar.
+
+    Returns a styled <span> with the count, or empty string if zero / unauth.
+    Polled every 30s by base.html via hx-get="/messaging/unread-count".
+    """
+    member = getattr(request.ctx, "member", None)
+    if member is None:
+        return sanic_html("")
+
+    try:
+        async with request.app.ctx.db() as session:
+            stmt = (
+                select(func.count(Message.id))
+                .join(
+                    ConversationParticipant,
+                    ConversationParticipant.conversation_id == Message.conversation_id,
+                )
+                .where(ConversationParticipant.member_id == member.id)
+                .where(Message.sender_id != member.id)
+                .where(Message.deleted_at.is_(None))
+                .where(
+                    (ConversationParticipant.last_read_at.is_(None))
+                    | (Message.created_at > ConversationParticipant.last_read_at)
+                )
+            )
+            result = await session.execute(stmt)
+            count = result.scalar() or 0
+
+        if count == 0:
+            return sanic_html("")
+        display = str(count) if count < 100 else "99+"
+        return sanic_html(
+            f'<span class="ml-auto text-xs font-medium bg-neos-primary text-white '
+            f'rounded-full px-1.5 py-0.5">{display}</span>'
+        )
+    except Exception:
+        logger.exception("Failed to load unread count")
+        return sanic_html("")
